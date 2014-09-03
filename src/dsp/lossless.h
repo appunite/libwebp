@@ -18,6 +18,9 @@
 #include "../webp/types.h"
 #include "../webp/decode.h"
 
+#include "../enc/histogram.h"
+#include "../utils/utils.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,24 +56,20 @@ extern VP8LConvertFunc VP8LConvertBGRAToRGB565;
 extern VP8LConvertFunc VP8LConvertBGRAToBGR;
 
 // Expose some C-only fallback functions
-extern void VP8LTransformColor_C(const VP8LMultipliers* const m,
+void VP8LTransformColor_C(const VP8LMultipliers* const m,
+                          uint32_t* data, int num_pixels);
+void VP8LTransformColorInverse_C(const VP8LMultipliers* const m,
                                  uint32_t* data, int num_pixels);
-extern void VP8LTransformColorInverse_C(const VP8LMultipliers* const m,
-                                        uint32_t* data, int num_pixels);
 
-extern void VP8LConvertBGRAToRGB_C(const uint32_t* src,
-                                   int num_pixels, uint8_t* dst);
-extern void VP8LConvertBGRAToRGBA_C(const uint32_t* src,
-                                    int num_pixels, uint8_t* dst);
-extern void VP8LConvertBGRAToRGBA4444_C(const uint32_t* src,
-                                        int num_pixels, uint8_t* dst);
-extern void VP8LConvertBGRAToRGB565_C(const uint32_t* src,
-                                      int num_pixels, uint8_t* dst);
-extern void VP8LConvertBGRAToBGR_C(const uint32_t* src,
-                                   int num_pixels, uint8_t* dst);
-extern void VP8LSubtractGreenFromBlueAndRed_C(uint32_t* argb_data,
-                                              int num_pixels);
-extern void VP8LAddGreenToBlueAndRed_C(uint32_t* data, int num_pixels);
+void VP8LConvertBGRAToRGB_C(const uint32_t* src, int num_pixels, uint8_t* dst);
+void VP8LConvertBGRAToRGBA_C(const uint32_t* src, int num_pixels, uint8_t* dst);
+void VP8LConvertBGRAToRGBA4444_C(const uint32_t* src,
+                                 int num_pixels, uint8_t* dst);
+void VP8LConvertBGRAToRGB565_C(const uint32_t* src,
+                               int num_pixels, uint8_t* dst);
+void VP8LConvertBGRAToBGR_C(const uint32_t* src, int num_pixels, uint8_t* dst);
+void VP8LSubtractGreenFromBlueAndRed_C(uint32_t* argb_data, int num_pixels);
+void VP8LAddGreenToBlueAndRed_C(uint32_t* data, int num_pixels);
 
 // Must be called before calling any of the above methods.
 void VP8LDspInit(void);
@@ -118,57 +117,54 @@ static WEBP_INLINE uint32_t VP8LSubSampleSize(uint32_t size,
   return (size + (1 << sampling_bits) - 1) >> sampling_bits;
 }
 
+// -----------------------------------------------------------------------------
 // Faster logarithm for integers. Small values use a look-up table.
 #define LOG_LOOKUP_IDX_MAX 256
 extern const float kLog2Table[LOG_LOOKUP_IDX_MAX];
 extern const float kSLog2Table[LOG_LOOKUP_IDX_MAX];
-float VP8LFastLog2Slow(int v);
-float VP8LFastSLog2Slow(int v);
-static WEBP_INLINE float VP8LFastLog2(int v) {
+typedef float (*VP8LFastLog2SlowFunc)(uint32_t v);
+
+extern VP8LFastLog2SlowFunc VP8LFastLog2Slow;
+extern VP8LFastLog2SlowFunc VP8LFastSLog2Slow;
+
+static WEBP_INLINE float VP8LFastLog2(uint32_t v) {
   return (v < LOG_LOOKUP_IDX_MAX) ? kLog2Table[v] : VP8LFastLog2Slow(v);
 }
 // Fast calculation of v * log2(v) for integer input.
-static WEBP_INLINE float VP8LFastSLog2(int v) {
+static WEBP_INLINE float VP8LFastSLog2(uint32_t v) {
   return (v < LOG_LOOKUP_IDX_MAX) ? kSLog2Table[v] : VP8LFastSLog2Slow(v);
 }
 
 // -----------------------------------------------------------------------------
+// Huffman-cost related functions.
+
+typedef double (*VP8LCostFunc)(const uint32_t* population, int length);
+typedef double (*VP8LCostCombinedFunc)(const uint32_t* X, const uint32_t* Y,
+                                       int length);
+
+extern VP8LCostFunc VP8LExtraCost;
+extern VP8LCostCombinedFunc VP8LExtraCostCombined;
+
+typedef struct {        // small struct to hold counters
+  int counts[2];        // index: 0=zero steak, 1=non-zero streak
+  int streaks[2][2];    // [zero/non-zero][streak<3 / streak>=3]
+} VP8LStreaks;
+
+typedef VP8LStreaks (*VP8LCostCountFunc)(const uint32_t* population,
+                                         int length);
+typedef VP8LStreaks (*VP8LCostCombinedCountFunc)(const uint32_t* X,
+                                                 const uint32_t* Y, int length);
+
+extern VP8LCostCountFunc VP8LHuffmanCostCount;
+extern VP8LCostCombinedCountFunc VP8LHuffmanCostCombinedCount;
+
+typedef void (*VP8LHistogramAddFunc)(const VP8LHistogram* const a,
+                                     const VP8LHistogram* const b,
+                                     VP8LHistogram* const out);
+extern VP8LHistogramAddFunc VP8LHistogramAdd;
+
+// -----------------------------------------------------------------------------
 // PrefixEncode()
-
-// use GNU builtins where available.
-#if defined(__GNUC__) && \
-    ((__GNUC__ == 3 && __GNUC_MINOR__ >= 4) || __GNUC__ >= 4)
-static WEBP_INLINE int BitsLog2Floor(uint32_t n) {
-  return 31 ^ __builtin_clz(n);
-}
-#elif defined(_MSC_VER) && _MSC_VER > 1310 && \
-      (defined(_M_X64) || defined(_M_IX86))
-#include <intrin.h>
-#pragma intrinsic(_BitScanReverse)
-
-static WEBP_INLINE int BitsLog2Floor(uint32_t n) {
-  unsigned long first_set_bit;
-  _BitScanReverse(&first_set_bit, n);
-  return first_set_bit;
-}
-#else
-// Returns (int)floor(log2(n)). n must be > 0.
-static WEBP_INLINE int BitsLog2Floor(uint32_t n) {
-  int log = 0;
-  uint32_t value = n;
-  int i;
-
-  for (i = 4; i >= 0; --i) {
-    const int shift = (1 << i);
-    const uint32_t x = value >> shift;
-    if (x != 0) {
-      value = x;
-      log += shift;
-    }
-  }
-  return log;
-}
-#endif
 
 static WEBP_INLINE int VP8LBitsLog2Ceiling(uint32_t n) {
   const int log_floor = BitsLog2Floor(n);

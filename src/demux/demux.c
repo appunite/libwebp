@@ -11,7 +11,7 @@
 //
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+#include "../webp/config.h"
 #endif
 
 #include <assert.h>
@@ -25,7 +25,7 @@
 
 #define DMUX_MAJ_VERSION 0
 #define DMUX_MIN_VERSION 2
-#define DMUX_REV_VERSION 0
+#define DMUX_REV_VERSION 1
 
 typedef struct {
   size_t start_;        // start location of the data

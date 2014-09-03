@@ -17,8 +17,9 @@
 
 #include <math.h>
 #include <stdlib.h>
-#include "./lossless.h"
 #include "../dec/vp8li.h"
+#include "../utils/endian_inl.h"
+#include "./lossless.h"
 #include "./yuv.h"
 
 #define MAX_DIFF_COST (1e30f)
@@ -332,14 +333,14 @@ const uint8_t kPrefixEncodeExtraBitsValue[PREFIX_LOOKUP_IDX_MAX] = {
 #define APPROX_LOG_WITH_CORRECTION_MAX  65536
 #define APPROX_LOG_MAX                   4096
 #define LOG_2_RECIPROCAL 1.44269504088896338700465094007086
-float VP8LFastSLog2Slow(int v) {
+static float FastSLog2Slow(uint32_t v) {
   assert(v >= LOG_LOOKUP_IDX_MAX);
   if (v < APPROX_LOG_WITH_CORRECTION_MAX) {
     int log_cnt = 0;
-    int y = 1;
+    uint32_t y = 1;
     int correction = 0;
     const float v_f = (float)v;
-    const int orig_v = v;
+    const uint32_t orig_v = v;
     do {
       ++log_cnt;
       v = v >> 1;
@@ -351,19 +352,19 @@ float VP8LFastSLog2Slow(int v) {
     // The correction factor: log(1 + d) ~ d; for very small d values, so
     // log2(1 + (v % y) / v) ~ LOG_2_RECIPROCAL * (v % y)/v
     // LOG_2_RECIPROCAL ~ 23/16
-    correction = (23 * (orig_v % y)) >> 4;
+    correction = (23 * (orig_v & (y - 1))) >> 4;
     return v_f * (kLog2Table[v] + log_cnt) + correction;
   } else {
     return (float)(LOG_2_RECIPROCAL * v * log((double)v));
   }
 }
 
-float VP8LFastLog2Slow(int v) {
+static float FastLog2Slow(uint32_t v) {
   assert(v >= LOG_LOOKUP_IDX_MAX);
   if (v < APPROX_LOG_WITH_CORRECTION_MAX) {
     int log_cnt = 0;
-    int y = 1;
-    const int orig_v = v;
+    uint32_t y = 1;
+    const uint32_t orig_v = v;
     double log_2;
     do {
       ++log_cnt;
@@ -374,7 +375,7 @@ float VP8LFastLog2Slow(int v) {
     if (orig_v >= APPROX_LOG_MAX) {
       // Since the division is still expensive, add this correction factor only
       // for large values of 'v'.
-      const int correction = (23 * (orig_v % y)) >> 4;
+      const int correction = (23 * (orig_v & (y - 1))) >> 4;
       log_2 += (double)correction / orig_v;
     }
     return (float)log_2;
@@ -432,7 +433,7 @@ static WEBP_INLINE uint32_t ClampedAddSubtractFull(uint32_t c0, uint32_t c1,
                                          (c1 >> 8) & 0xff,
                                          (c2 >> 8) & 0xff);
   const int b = AddSubtractComponentFull(c0 & 0xff, c1 & 0xff, c2 & 0xff);
-  return (a << 24) | (r << 16) | (g << 8) | b;
+  return ((uint32_t)a << 24) | (r << 16) | (g << 8) | b;
 }
 
 static WEBP_INLINE int AddSubtractComponentHalf(int a, int b) {
@@ -446,14 +447,23 @@ static WEBP_INLINE uint32_t ClampedAddSubtractHalf(uint32_t c0, uint32_t c1,
   const int r = AddSubtractComponentHalf((ave >> 16) & 0xff, (c2 >> 16) & 0xff);
   const int g = AddSubtractComponentHalf((ave >> 8) & 0xff, (c2 >> 8) & 0xff);
   const int b = AddSubtractComponentHalf((ave >> 0) & 0xff, (c2 >> 0) & 0xff);
-  return (a << 24) | (r << 16) | (g << 8) | b;
+  return ((uint32_t)a << 24) | (r << 16) | (g << 8) | b;
 }
 
-static WEBP_INLINE int Sub3(int a, int b, int c) {
+// gcc-4.9 on ARM generates incorrect code in Select() when Sub3() is inlined.
+#if defined(__arm__) && LOCAL_GCC_VERSION == 0x409
+# define LOCAL_INLINE __attribute__ ((noinline))
+#else
+# define LOCAL_INLINE WEBP_INLINE
+#endif
+
+static LOCAL_INLINE int Sub3(int a, int b, int c) {
   const int pb = b - c;
   const int pa = a - c;
   return abs(pb) - abs(pa);
 }
+
+#undef LOCAL_INLINE
 
 static WEBP_INLINE uint32_t Select(uint32_t a, uint32_t b, uint32_t c) {
   const int pa_minus_pb =
@@ -1168,7 +1178,7 @@ static void ColorSpaceInverseTransform(const VP8LTransform* const transform,
       data += remaining_width;
     }
     ++y;
-    if ((y & mask) == 0) pred_row += tiles_per_row;;
+    if ((y & mask) == 0) pred_row += tiles_per_row;
   }
 }
 
@@ -1357,29 +1367,18 @@ static void CopyOrSwap(const uint32_t* src, int num_pixels, uint8_t* dst,
   if (is_big_endian() == swap_on_big_endian) {
     const uint32_t* const src_end = src + num_pixels;
     while (src < src_end) {
-      uint32_t argb = *src++;
+      const uint32_t argb = *src++;
 
-#if !defined(__BIG_ENDIAN__)
+#if !defined(WORDS_BIGENDIAN)
 #if !defined(WEBP_REFERENCE_IMPLEMENTATION)
-#if defined(__i386__) || defined(__x86_64__)
-      __asm__ volatile("bswap %0" : "=r"(argb) : "0"(argb));
-      *(uint32_t*)dst = argb;
-#elif defined(_MSC_VER)
-      argb = _byteswap_ulong(argb);
-      *(uint32_t*)dst = argb;
-#else
-      dst[0] = (argb >> 24) & 0xff;
-      dst[1] = (argb >> 16) & 0xff;
-      dst[2] = (argb >>  8) & 0xff;
-      dst[3] = (argb >>  0) & 0xff;
-#endif
+      *(uint32_t*)dst = BSwap32(argb);
 #else  // WEBP_REFERENCE_IMPLEMENTATION
       dst[0] = (argb >> 24) & 0xff;
       dst[1] = (argb >> 16) & 0xff;
       dst[2] = (argb >>  8) & 0xff;
       dst[3] = (argb >>  0) & 0xff;
 #endif
-#else  // __BIG_ENDIAN__
+#else  // WORDS_BIGENDIAN
       dst[0] = (argb >>  0) & 0xff;
       dst[1] = (argb >>  8) & 0xff;
       dst[2] = (argb >> 16) & 0xff;
@@ -1437,6 +1436,7 @@ void VP8LConvertFromBGRA(const uint32_t* const in_data, int num_pixels,
   }
 }
 
+//------------------------------------------------------------------------------
 // Bundles multiple (1, 2, 4 or 8) pixels into a single pixel.
 void VP8LBundleColorMap(const uint8_t* const row, int width,
                         int xbits, uint32_t* const dst) {
@@ -1460,6 +1460,108 @@ void VP8LBundleColorMap(const uint8_t* const row, int width,
 
 //------------------------------------------------------------------------------
 
+static double ExtraCost(const uint32_t* population, int length) {
+  int i;
+  double cost = 0.;
+  for (i = 2; i < length - 2; ++i) cost += (i >> 1) * population[i + 2];
+  return cost;
+}
+
+static double ExtraCostCombined(const uint32_t* X, const uint32_t* Y,
+                                int length) {
+  int i;
+  double cost = 0.;
+  for (i = 2; i < length - 2; ++i) {
+    const int xy = X[i + 2] + Y[i + 2];
+    cost += (i >> 1) * xy;
+  }
+  return cost;
+}
+
+// Returns the various RLE counts
+static VP8LStreaks HuffmanCostCount(const uint32_t* population, int length) {
+  int i;
+  int streak = 0;
+  VP8LStreaks stats;
+  memset(&stats, 0, sizeof(stats));
+  for (i = 0; i < length - 1; ++i) {
+    ++streak;
+    if (population[i] == population[i + 1]) {
+      continue;
+    }
+    stats.counts[population[i] != 0] += (streak > 3);
+    stats.streaks[population[i] != 0][(streak > 3)] += streak;
+    streak = 0;
+  }
+  ++streak;
+  stats.counts[population[i] != 0] += (streak > 3);
+  stats.streaks[population[i] != 0][(streak > 3)] += streak;
+  return stats;
+}
+
+static VP8LStreaks HuffmanCostCombinedCount(const uint32_t* X,
+                                            const uint32_t* Y, int length) {
+  int i;
+  int streak = 0;
+  VP8LStreaks stats;
+  memset(&stats, 0, sizeof(stats));
+  for (i = 0; i < length - 1; ++i) {
+    const int xy = X[i] + Y[i];
+    const int xy_next = X[i + 1] + Y[i + 1];
+    ++streak;
+    if (xy == xy_next) {
+      continue;
+    }
+    stats.counts[xy != 0] += (streak > 3);
+    stats.streaks[xy != 0][(streak > 3)] += streak;
+    streak = 0;
+  }
+  {
+    const int xy = X[i] + Y[i];
+    ++streak;
+    stats.counts[xy != 0] += (streak > 3);
+    stats.streaks[xy != 0][(streak > 3)] += streak;
+  }
+  return stats;
+}
+
+//------------------------------------------------------------------------------
+
+static void HistogramAdd(const VP8LHistogram* const a,
+                         const VP8LHistogram* const b,
+                         VP8LHistogram* const out) {
+  int i;
+  const int literal_size = VP8LHistogramNumCodes(a->palette_code_bits_);
+  assert(a->palette_code_bits_ == b->palette_code_bits_);
+  if (b != out) {
+    for (i = 0; i < literal_size; ++i) {
+      out->literal_[i] = a->literal_[i] + b->literal_[i];
+    }
+    for (i = 0; i < NUM_DISTANCE_CODES; ++i) {
+      out->distance_[i] = a->distance_[i] + b->distance_[i];
+    }
+    for (i = 0; i < NUM_LITERAL_CODES; ++i) {
+      out->red_[i] = a->red_[i] + b->red_[i];
+      out->blue_[i] = a->blue_[i] + b->blue_[i];
+      out->alpha_[i] = a->alpha_[i] + b->alpha_[i];
+    }
+  } else {
+    for (i = 0; i < literal_size; ++i) {
+      out->literal_[i] += a->literal_[i];
+    }
+    for (i = 0; i < NUM_DISTANCE_CODES; ++i) {
+      out->distance_[i] += a->distance_[i];
+    }
+    for (i = 0; i < NUM_LITERAL_CODES; ++i) {
+      out->red_[i] += a->red_[i];
+      out->blue_[i] += a->blue_[i];
+      out->alpha_[i] += a->alpha_[i];
+    }
+  }
+}
+
+//------------------------------------------------------------------------------
+
 VP8LProcessBlueAndRedFunc VP8LSubtractGreenFromBlueAndRed;
 VP8LProcessBlueAndRedFunc VP8LAddGreenToBlueAndRed;
 VP8LPredictorFunc VP8LPredictors[16];
@@ -1473,8 +1575,20 @@ VP8LConvertFunc VP8LConvertBGRAToRGBA4444;
 VP8LConvertFunc VP8LConvertBGRAToRGB565;
 VP8LConvertFunc VP8LConvertBGRAToBGR;
 
+VP8LFastLog2SlowFunc VP8LFastLog2Slow;
+VP8LFastLog2SlowFunc VP8LFastSLog2Slow;
+
+VP8LCostFunc VP8LExtraCost;
+VP8LCostCombinedFunc VP8LExtraCostCombined;
+
+VP8LCostCountFunc VP8LHuffmanCostCount;
+VP8LCostCombinedCountFunc VP8LHuffmanCostCombinedCount;
+
+VP8LHistogramAddFunc VP8LHistogramAdd;
+
 extern void VP8LDspInitSSE2(void);
 extern void VP8LDspInitNEON(void);
+extern void VP8LDspInitMIPS32(void);
 
 void VP8LDspInit(void) {
   memcpy(VP8LPredictors, kPredictorsC, sizeof(VP8LPredictors));
@@ -1491,6 +1605,17 @@ void VP8LDspInit(void) {
   VP8LConvertBGRAToRGB565 = VP8LConvertBGRAToRGB565_C;
   VP8LConvertBGRAToBGR = VP8LConvertBGRAToBGR_C;
 
+  VP8LFastLog2Slow = FastLog2Slow;
+  VP8LFastSLog2Slow = FastSLog2Slow;
+
+  VP8LExtraCost = ExtraCost;
+  VP8LExtraCostCombined = ExtraCostCombined;
+
+  VP8LHuffmanCostCount = HuffmanCostCount;
+  VP8LHuffmanCostCombinedCount = HuffmanCostCombinedCount;
+
+  VP8LHistogramAdd = HistogramAdd;
+
   // If defined, use CPUInfo() to overwrite some pointers with faster versions.
   if (VP8GetCPUInfo != NULL) {
 #if defined(WEBP_USE_SSE2)
@@ -1501,6 +1626,11 @@ void VP8LDspInit(void) {
 #if defined(WEBP_USE_NEON)
     if (VP8GetCPUInfo(kNEON)) {
       VP8LDspInitNEON();
+    }
+#endif
+#if defined(WEBP_USE_MIPS32)
+    if (VP8GetCPUInfo(kMIPS32)) {
+      VP8LDspInitMIPS32();
     }
 #endif
   }

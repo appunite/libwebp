@@ -741,12 +741,18 @@ static int ReconstructIntra16(VP8EncIterator* const it,
             TrellisQuantizeBlock(enc, tmp[n], rd->y_ac_levels[n], ctx, 0,
                                  &dqm->y1_, dqm->lambda_trellis_i16_);
         it->top_nz_[x] = it->left_nz_[y] = non_zero;
+        rd->y_ac_levels[n][0] = 0;
         nz |= non_zero << n;
       }
     }
   } else {
-    for (n = 0; n < 16; ++n) {
-      nz |= VP8EncQuantizeBlock(tmp[n], rd->y_ac_levels[n], 1, &dqm->y1_) << n;
+    for (n = 0; n < 16; n += 2) {
+      // Zero-out the first coeff, so that: a) nz is correct below, and
+      // b) finding 'last' non-zero coeffs in SetResidualCoeffs() is simplified.
+      tmp[n][0] = tmp[n + 1][0] = 0;
+      nz |= VP8EncQuantize2Blocks(tmp[n], rd->y_ac_levels[n], &dqm->y1_) << n;
+      assert(rd->y_ac_levels[n + 0][0] == 0);
+      assert(rd->y_ac_levels[n + 1][0] == 0);
     }
   }
 
@@ -777,7 +783,7 @@ static int ReconstructIntra4(VP8EncIterator* const it,
     nz = TrellisQuantizeBlock(enc, tmp, levels, ctx, 3, &dqm->y1_,
                               dqm->lambda_trellis_i4_);
   } else {
-    nz = VP8EncQuantizeBlock(tmp, levels, 0, &dqm->y1_);
+    nz = VP8EncQuantizeBlock(tmp, levels, &dqm->y1_);
   }
   VP8ITransform(ref, tmp, yuv_out, 0);
   return nz;
@@ -811,8 +817,8 @@ static int ReconstructUV(VP8EncIterator* const it, VP8ModeScore* const rd,
       }
     }
   } else {
-    for (n = 0; n < 8; ++n) {
-      nz |= VP8EncQuantizeBlock(tmp[n], rd->uv_levels[n], 0, &dqm->uv_) << n;
+    for (n = 0; n < 8; n += 2) {
+      nz |= VP8EncQuantize2Blocks(tmp[n], rd->uv_levels[n], &dqm->uv_) << n;
     }
   }
 

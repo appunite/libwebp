@@ -20,7 +20,6 @@
 #include "../utils/bit_reader.h"
 #include "../utils/color_cache.h"
 #include "../utils/huffman.h"
-#include "../webp/format_constants.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,10 +41,6 @@ struct VP8LTransform {
 };
 
 typedef struct {
-  HuffmanTree htrees_[HUFFMAN_CODES_PER_META_CODE];
-} HTreeGroup;
-
-typedef struct {
   int             color_cache_size_;
   VP8LColorCache  color_cache_;
 
@@ -55,6 +50,7 @@ typedef struct {
   uint32_t       *huffman_image_;
   int             num_htree_groups_;
   HTreeGroup     *htree_groups_;
+  HuffmanCode    *huffman_tables_;
 } VP8LMetadata;
 
 typedef struct VP8LDecoder VP8LDecoder;

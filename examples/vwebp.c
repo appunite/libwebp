@@ -11,7 +11,7 @@
 //
 // Author: Skal (pascal.massimino@gmail.com)
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+#include "webp/config.h"
 #endif
 
 #include <stdio.h>
@@ -372,19 +372,20 @@ static void Help(void) {
   printf("Usage: vwebp in_file [options]\n\n"
          "Decodes the WebP image file and visualize it using OpenGL\n"
          "Options are:\n"
-         "  -version  .... print version number and exit.\n"
-         "  -noicc ....... don't use the icc profile if present.\n"
-         "  -nofancy ..... don't use the fancy YUV420 upscaler.\n"
-         "  -nofilter .... disable in-loop filtering.\n"
-         "  -dither <int>  dithering strength (0..100). Default=50.\n"
-         "  -mt .......... use multi-threading.\n"
-         "  -info ........ print info.\n"
-         "  -h     ....... this help message.\n"
+         "  -version  .... print version number and exit\n"
+         "  -noicc ....... don't use the icc profile if present\n"
+         "  -nofancy ..... don't use the fancy YUV420 upscaler\n"
+         "  -nofilter .... disable in-loop filtering\n"
+         "  -dither <int>  dithering strength (0..100), default=50\n"
+         "  -noalphadither disable alpha plane dithering\n"
+         "  -mt .......... use multi-threading\n"
+         "  -info ........ print info\n"
+         "  -h     ....... this help message\n"
          "\n"
          "Keyboard shortcuts:\n"
-         "  'c' ................ toggle use of color profile.\n"
-         "  'i' ................ overlay file information.\n"
-         "  'q' / 'Q' / ESC .... quit.\n"
+         "  'c' ................ toggle use of color profile\n"
+         "  'i' ................ overlay file information\n"
+         "  'q' / 'Q' / ESC .... quit\n"
         );
 }
 
@@ -399,6 +400,7 @@ int main(int argc, char *argv[]) {
     return -1;
   }
   config->options.dithering_strength = 50;
+  config->options.alpha_dithering_strength = 100;
   kParams.use_color_profile = 1;
 
   for (c = 1; c < argc; ++c) {
@@ -411,6 +413,8 @@ int main(int argc, char *argv[]) {
       config->options.no_fancy_upsampling = 1;
     } else if (!strcmp(argv[c], "-nofilter")) {
       config->options.bypass_filtering = 1;
+    } else if (!strcmp(argv[c], "-noalphadither")) {
+      config->options.alpha_dithering_strength = 0;
     } else if (!strcmp(argv[c], "-dither") && c + 1 < argc) {
       config->options.dithering_strength = strtol(argv[++c], NULL, 0);
     } else if (!strcmp(argv[c], "-info")) {

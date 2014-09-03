@@ -17,7 +17,9 @@
 #include <stdlib.h>  // for abs()
 #include <emmintrin.h>
 
+#include "../enc/cost.h"
 #include "../enc/vp8enci.h"
+#include "../utils/utils.h"
 
 //------------------------------------------------------------------------------
 // Quite useful macro for debugging. Left here for convenience.
@@ -443,10 +445,10 @@ static void FTransform(const uint8_t* src, const uint8_t* ref, int16_t* out) {
     // -> f1 = f1 + 1 - (a3 == 0)
     const __m128i g1 = _mm_add_epi16(f1, _mm_cmpeq_epi16(a32, zero));
 
-    _mm_storel_epi64((__m128i*)&out[ 0], d0);
-    _mm_storel_epi64((__m128i*)&out[ 4], g1);
-    _mm_storel_epi64((__m128i*)&out[ 8], d2);
-    _mm_storel_epi64((__m128i*)&out[12], f3);
+    const __m128i d0_g1 = _mm_unpacklo_epi64(d0, g1);
+    const __m128i d2_f3 = _mm_unpacklo_epi64(d2, f3);
+    _mm_storeu_si128((__m128i*)&out[0], d0_g1);
+    _mm_storeu_si128((__m128i*)&out[8], d2_f3);
   }
 }
 
@@ -803,9 +805,7 @@ static int Disto16x16(const uint8_t* const a, const uint8_t* const b,
 // Quantization
 //
 
-#define QFIX2 0
 static WEBP_INLINE int DoQuantizeBlock(int16_t in[16], int16_t out[16],
-                                       int n, int shift,
                                        const uint16_t* const sharpen,
                                        const VP8Matrix* const mtx) {
   const __m128i max_coeff_2047 = _mm_set1_epi16(MAX_LEVEL);
@@ -842,7 +842,7 @@ static WEBP_INLINE int DoQuantizeBlock(int16_t in[16], int16_t out[16],
     coeff8 = _mm_add_epi16(coeff8, sharpen8);
   }
 
-  // out = (coeff * iQ + B) >> (QFIX + QFIX2 - shift)
+  // out = (coeff * iQ + B) >> QFIX
   {
     // doing calculations with 32b precision (QFIX=17)
     // out = (coeff * iQ)
@@ -863,11 +863,11 @@ static WEBP_INLINE int DoQuantizeBlock(int16_t in[16], int16_t out[16],
     out_04 = _mm_add_epi32(out_04, bias_04);
     out_08 = _mm_add_epi32(out_08, bias_08);
     out_12 = _mm_add_epi32(out_12, bias_12);
-    // out = QUANTDIV(coeff, iQ, B, QFIX + QFIX2 - shift)
-    out_00 = _mm_srai_epi32(out_00, QFIX + QFIX2 - shift);
-    out_04 = _mm_srai_epi32(out_04, QFIX + QFIX2 - shift);
-    out_08 = _mm_srai_epi32(out_08, QFIX + QFIX2 - shift);
-    out_12 = _mm_srai_epi32(out_12, QFIX + QFIX2 - shift);
+    // out = QUANTDIV(coeff, iQ, B, QFIX)
+    out_00 = _mm_srai_epi32(out_00, QFIX);
+    out_04 = _mm_srai_epi32(out_04, QFIX);
+    out_08 = _mm_srai_epi32(out_08, QFIX);
+    out_12 = _mm_srai_epi32(out_12, QFIX);
 
     // pack result as 16b
     out0 = _mm_packs_epi32(out_00, out_04);
@@ -916,18 +916,53 @@ static WEBP_INLINE int DoQuantizeBlock(int16_t in[16], int16_t out[16],
   }
 
   // detect if all 'out' values are zeroes or not
-  if (n) packed_out = _mm_srli_si128(packed_out, 1);   // ignore DC for n == 1
   return (_mm_movemask_epi8(_mm_cmpeq_epi8(packed_out, zero)) != 0xffff);
 }
 
 static int QuantizeBlock(int16_t in[16], int16_t out[16],
-                         int n, const VP8Matrix* const mtx) {
-  return DoQuantizeBlock(in, out, n, 0, &mtx->sharpen_[0], mtx);
+                         const VP8Matrix* const mtx) {
+  return DoQuantizeBlock(in, out, &mtx->sharpen_[0], mtx);
 }
 
 static int QuantizeBlockWHT(int16_t in[16], int16_t out[16],
                             const VP8Matrix* const mtx) {
-  return DoQuantizeBlock(in, out, 0, 0, &mtx->sharpen_[0], mtx);
+  return DoQuantizeBlock(in, out, NULL, mtx);
+}
+
+static int Quantize2Blocks(int16_t in[32], int16_t out[32],
+                           const VP8Matrix* const mtx) {
+  int nz;
+  const uint16_t* const sharpen = &mtx->sharpen_[0];
+  nz  = DoQuantizeBlock(in + 0 * 16, out + 0 * 16, sharpen, mtx) << 0;
+  nz |= DoQuantizeBlock(in + 1 * 16, out + 1 * 16, sharpen, mtx) << 1;
+  return nz;
+}
+
+// Forward declaration.
+void VP8SetResidualCoeffsSSE2(const int16_t* const coeffs,
+                              VP8Residual* const res);
+
+void VP8SetResidualCoeffsSSE2(const int16_t* const coeffs,
+                              VP8Residual* const res) {
+  const __m128i c0 = _mm_loadu_si128((const __m128i*)coeffs);
+  const __m128i c1 = _mm_loadu_si128((const __m128i*)(coeffs + 8));
+  // Use SSE to compare 8 values with a single instruction.
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i m0 = _mm_cmpeq_epi16(c0, zero);
+  const __m128i m1 = _mm_cmpeq_epi16(c1, zero);
+  // Get the comparison results as a bitmask, consisting of two times 16 bits:
+  // two identical bits for each result. Concatenate both bitmasks to get a
+  // single 32 bit value. Negate the mask to get the position of entries that
+  // are not equal to zero. We don't need to mask out least significant bits
+  // according to res->first, since coeffs[0] is 0 if res->first > 0
+  const uint32_t mask =
+      ~(((uint32_t)_mm_movemask_epi8(m1) << 16) | _mm_movemask_epi8(m0));
+  // The position of the most significant non-zero bit indicates the position of
+  // the last non-zero value. Divide the result by two because __movemask_epi8
+  // operates on 8 bit values instead of 16 bit values.
+  assert(res->first == 0 || coeffs[0] == 0);
+  res->last = mask ? (BitsLog2Floor(mask) >> 1) : -1;
+  res->coeffs = coeffs;
 }
 
 #endif   // WEBP_USE_SSE2
@@ -941,6 +976,7 @@ void VP8EncDspInitSSE2(void) {
 #if defined(WEBP_USE_SSE2)
   VP8CollectHistogram = CollectHistogram;
   VP8EncQuantizeBlock = QuantizeBlock;
+  VP8EncQuantize2Blocks = Quantize2Blocks;
   VP8EncQuantizeBlockWHT = QuantizeBlockWHT;
   VP8ITransform = ITransform;
   VP8FTransform = FTransform;

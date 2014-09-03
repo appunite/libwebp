@@ -72,11 +72,11 @@ static WEBP_INLINE size_t VP8BitWriterSize(const VP8BitWriter* const bw) {
 #if defined(__x86_64__) || defined(_M_X64)   // 64bit
 typedef uint64_t vp8l_atype_t;   // accumulator type
 typedef uint32_t vp8l_wtype_t;   // writing type
-#define WSWAP htole32
+#define WSWAP HToLE32
 #else
 typedef uint32_t vp8l_atype_t;
 typedef uint16_t vp8l_wtype_t;
-#define WSWAP htole16
+#define WSWAP HToLE16
 #endif
 
 typedef struct {
@@ -106,7 +106,8 @@ void VP8LBitWriterDestroy(VP8LBitWriter* const bw);
 
 // This function writes bits into bytes in increasing addresses (little endian),
 // and within a byte least-significant-bit first.
-// The function can write up to 8*sizeof(vp8l_wtype_t) bits in one go.
+// This function can write up to 32 bits in one go, but VP8LBitReader can only
+// read 24 bits max (VP8L_MAX_NUM_BIT_READ).
 // VP8LBitWriter's error_ flag is set in case of  memory allocation error.
 void VP8LWriteBits(VP8LBitWriter* const bw, int n_bits, uint32_t bits);
 

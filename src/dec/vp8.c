@@ -17,7 +17,7 @@
 #include "./vp8i.h"
 #include "./vp8li.h"
 #include "./webpi.h"
-#include "../utils/bit_reader.h"
+#include "../utils/bit_reader_inl.h"
 #include "../utils/utils.h"
 
 //------------------------------------------------------------------------------
@@ -48,7 +48,7 @@ VP8Decoder* VP8New(void) {
   VP8Decoder* const dec = (VP8Decoder*)WebPSafeCalloc(1ULL, sizeof(*dec));
   if (dec != NULL) {
     SetOk(dec);
-    WebPWorkerInit(&dec->worker_);
+    WebPGetWorkerInterface()->Init(&dec->worker_);
     dec->ready_ = 0;
     dec->num_parts_ = 1;
   }
@@ -363,28 +363,6 @@ int VP8GetHeaders(VP8Decoder* const dec, VP8Io* const io) {
 
   VP8ParseProba(br, dec);
 
-#ifdef WEBP_EXPERIMENTAL_FEATURES
-  // Extensions
-  if (dec->pic_hdr_.colorspace_) {
-    const size_t kTrailerSize = 8;
-    const uint8_t kTrailerMarker = 0x01;
-    const uint8_t* ext_buf = buf - kTrailerSize;
-    size_t size;
-
-    if (frm_hdr->partition_length_ < kTrailerSize ||
-        ext_buf[kTrailerSize - 1] != kTrailerMarker) {
-      return VP8SetError(dec, VP8_STATUS_BITSTREAM_ERROR,
-                         "RIFF: Inconsistent extra information.");
-    }
-
-    // Layer
-    size = (ext_buf[0] << 0) | (ext_buf[1] << 8) | (ext_buf[2] << 16);
-    dec->layer_data_size_ = size;
-    dec->layer_data_ = NULL;  // will be set later
-    dec->layer_colorspace_ = ext_buf[3];
-  }
-#endif
-
   // sanitized state
   dec->ready_ = 1;
   return 1;
@@ -626,17 +604,8 @@ static int ParseFrame(VP8Decoder* const dec, VP8Io* io) {
     }
   }
   if (dec->mt_method_ > 0) {
-    if (!WebPWorkerSync(&dec->worker_)) return 0;
+    if (!WebPGetWorkerInterface()->Sync(&dec->worker_)) return 0;
   }
-
-  // Finish
-#ifdef WEBP_EXPERIMENTAL_FEATURES
-  if (dec->layer_data_size_ > 0) {
-    if (!VP8DecodeLayer(dec)) {
-      return 0;
-    }
-  }
-#endif
 
   return 1;
 }
@@ -685,9 +654,7 @@ void VP8Clear(VP8Decoder* const dec) {
   if (dec == NULL) {
     return;
   }
-  if (dec->mt_method_ > 0) {
-    WebPWorkerEnd(&dec->worker_);
-  }
+  WebPGetWorkerInterface()->End(&dec->worker_);
   ALPHDelete(dec->alph_dec_);
   dec->alph_dec_ = NULL;
   WebPSafeFree(dec->mem_);
